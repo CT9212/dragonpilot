@@ -72,6 +72,7 @@ def manager_init() -> None:
     ("DynamicLaneProfile", "1"),
     ("DynamicLaneProfileToggle", "0"),
     ("EnableMads", "1"),
+    ("EnforceTorqueLateral", "1"),
     ("EnhancedScc", "0"),
     ("GpxDeleteAfterUpload", "1"),
     ("GpxDeleteIfUploaded", "1"),
