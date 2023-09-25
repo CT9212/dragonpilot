@@ -7,6 +7,7 @@ from openpilot.selfdrive.car.toyota import toyotacan
 from openpilot.selfdrive.car.toyota.values import CAR, STATIC_DSU_MSGS, NO_STOP_TIMER_CAR, TSS2_CAR, \
                                         MIN_ACC_SPEED, PEDAL_TRANSITION, CarControllerParams, ToyotaFlags, \
                                         UNSUPPORTED_DSU_CAR
+from openpilot.selfdrive.car.toyota.interface import CarInterface
 from opendbc.can.packer import CANPacker
 
 SteerControlType = car.CarParams.SteerControlType
@@ -43,6 +44,9 @@ class CarController:
     self.accel = 0
 
     self.param_s = Params()
+    self.last_off_frame = 0
+    self.permit_braking = True
+    self.e2e_long = Params().get_bool("ExperimentalMode")
     self._reverse_acc_change = self.param_s.get_bool("ReverseAccChange")
     self._sng_hack = self.param_s.get_bool("ToyotaSnG")
 
@@ -65,6 +69,8 @@ class CarController:
 
     if not CC.latActive:
       apply_steer = 0
+
+    lead_vehicle_stopped = (hud_control.leadVelocity < 0.5 and hud_control.leadVisible) and not self.e2e_long
 
     # *** steer angle ***
     if self.CP.steerControlType == SteerControlType.angle:
@@ -112,7 +118,8 @@ class CarController:
       interceptor_gas_cmd = clip(pedal_command, 0., MAX_INTERCEPTOR_GAS)
     else:
       interceptor_gas_cmd = 0.
-    pcm_accel_cmd = clip(actuators.accel, self.params.ACCEL_MIN, self.params.ACCEL_MAX)
+    pid_accel_limits = CarInterface.get_pid_accel_limits(self.CP, CS.out.vEgo, None)  # Need to get cruise speed from somewhere
+    pcm_accel_cmd = clip(actuators.accel, pid_accel_limits[0], pid_accel_limits[1])
 
     # TODO: probably can delete this. CS.pcm_acc_status uses a different signal
     # than CS.cruiseState.enabled. confirm they're not meaningfully different
@@ -120,14 +127,30 @@ class CarController:
       pcm_cancel_cmd = 1
 
     # on entering standstill, send standstill request
-    if CS.out.standstill and not self.last_standstill and (self.CP.carFingerprint not in NO_STOP_TIMER_CAR or self.CP.enableGasInterceptor) and \
-      not self._sng_hack:
+    if CS.out.standstill and lead_vehicle_stopped and not self.last_standstill and (self.CP.carFingerprint not in NO_STOP_TIMER_CAR or self.CP.enableGasInterceptor):
       self.standstill_req = True
     if CS.pcm_acc_status != 8:
       # pcm entered standstill or it's disabled
       self.standstill_req = False
+    if self._sng_hack and (self.CP.flags & ToyotaFlags.HYBRID.value) and (self.CP.flags & ToyotaFlags.SMART_DSU.value):
+      self.standstill_req = False
 
     self.last_standstill = CS.out.standstill
+
+    # record frames
+    if not CC.enabled:
+      self.last_off_frame = self.frame
+
+    # cydia2020 - PERMIT_BRAKING commands the PCM to allow openpilot to engage the friction brakes
+    # and engine brake on your vehicle, it does not affect regen braking as far as I can tell
+    # setting PERMIT_BRAKING to 1 prevents the vehicle from coasting at low speed with low accel
+    # allow the vehicle to coast when the speed is below 6m/s for improved SnG smoothness
+    permit_braking_accel = interp(CS.out.vEgo, [0.0, 6., 10.], [0., 0.0, 0.35])
+    # Handle permit braking logic
+    if (actuators.accel > permit_braking_accel) or not CC.enabled:
+      self.permit_braking = False
+    else:
+      self.permit_braking = True
 
     # handle UI messages
     fcw_alert = hud_control.visualAlert == VisualAlert.fcw
@@ -142,10 +165,10 @@ class CarController:
       if pcm_cancel_cmd and self.CP.carFingerprint in UNSUPPORTED_DSU_CAR:
         can_sends.append(toyotacan.create_acc_cancel_command(self.packer))
       elif self.CP.openpilotLongitudinalControl:
-        can_sends.append(toyotacan.create_accel_command(self.packer, pcm_accel_cmd, pcm_cancel_cmd, self.standstill_req, lead, CS.acc_type, fcw_alert, reverse_acc, CS.gac_send))
+        can_sends.append(toyotacan.create_accel_command(self.packer, pcm_accel_cmd, pcm_cancel_cmd, self.standstill_req, lead, CS.acc_type, fcw_alert, reverse_acc, CS.gac_send, self.permit_braking, lead_vehicle_stopped))
         self.accel = pcm_accel_cmd
       else:
-        can_sends.append(toyotacan.create_accel_command(self.packer, 0, pcm_cancel_cmd, False, lead, CS.acc_type, False, reverse_acc, CS.gac_send))
+        can_sends.append(toyotacan.create_accel_command(self.packer, 0, pcm_cancel_cmd, False, lead, CS.acc_type, False, reverse_acc, CS.gac_send, False, False))
 
     if self.frame % 2 == 0 and self.CP.enableGasInterceptor and self.CP.openpilotLongitudinalControl:
       # send exactly zero if gas cmd is zero. Interceptor will send the max between read value and gas cmd.
