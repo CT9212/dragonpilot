@@ -137,6 +137,7 @@ class CarInterface(CarInterfaceBase):
 
     if candidate == CAR.VOLT:
       ret.mass = 1607.
+      ret.minEnableSpeed = -1 * CV.MPH_TO_MS
       ret.wheelbase = 2.69
       ret.steerRatio = 17.7  # Stock 15.7, LiveParameters
       ret.tireStiffnessFactor = 0.469  # Stock Michelin Energy Saver A/S, LiveParameters
